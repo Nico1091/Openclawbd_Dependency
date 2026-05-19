@@ -3,7 +3,6 @@
  * memory_mcp_server.js
  * --------------------
  * Servidor MCP para OpenClaw + Gemma 4.
- * Usa sql.js (WebAssembly) — sin compilación nativa.
  */
 
 const readline = require('readline');
@@ -12,7 +11,7 @@ const { MemoryManager, DEFAULT_DB } = require('./memory_manager');
 const TOOLS = [
   {
     name: 'memory_save',
-    description: 'Guarda un recuerdo persistente en SQL. Úsalo cuando el usuario mencione preferencias, hechos importantes, tareas, o información que deba recordarse entre sesiones.',
+    description: 'Guarda un recuerdo persistente en SQL. Úsalo cuando el usuario mencione preferencias, hechos importantes, tareas, o información.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -89,11 +88,11 @@ function handleTool(mem, name, args) {
     }
     case 'memory_search': {
       const results = mem.search(args.query, { limit: args.limit || 10, scope: args.scope || null });
-      return { count: results.length, memories: results.map(m => ({ id: m.id, type: m.type, scope: m.scope, content: m.content, importance: m.importance, createdAt: m.created_at })) };
+      return { count: results.length, memories: results };
     }
     case 'memory_recall': {
       const results = mem.recall({ scope: args.scope || 'user', type: args.type || null, limit: args.limit || 20, minImportance: args.minImportance || 0.0 });
-      return { count: results.length, memories: results.map(m => ({ id: m.id, type: m.type, scope: m.scope, content: m.content, importance: m.importance, createdAt: m.created_at })) };
+      return { count: results.length, memories: results };
     }
     case 'memory_forget': {
       mem.forget(args.memoryId);
@@ -109,7 +108,6 @@ function handleTool(mem, name, args) {
 }
 
 async function main() {
-  // Inicializar memoria ANTES de abrir readline
   let mem;
   try {
     mem = await MemoryManager.create(process.env.MEMORY_DB_PATH || DEFAULT_DB);

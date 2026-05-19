@@ -1,165 +1,113 @@
-/**
- * memory_mcp_server.js
- * --------------------
- * Servidor MCP para OpenClaw + Gemma 4.
- * Usa sql.js (WebAssembly) — sin compilación nativa.
- */
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const initSqlJs = require('sql.js');
 
-const readline = require('readline');
-const { MemoryManager, DEFAULT_DB } = require('./memory_manager');
+const DEFAULT_DB = process.env.MEMORY_DB_PATH || 
+  path.join(os.homedir(), '.openclaw', 'plugin-skills', 'Integration_Database', 'memory.db');
 
-const TOOLS = [
-  {
-    name: 'memory_save',
-    description: 'Guarda un recuerdo persistente en SQL. Úsalo cuando el usuario mencione preferencias, hechos importantes, tareas, o información que deba recordarse entre sesiones.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        content:    { type: 'string', description: 'Texto del recuerdo' },
-        type:       { type: 'string', enum: ['fact','preference','task','note','summary'], default: 'fact' },
-        scope:      { type: 'string', enum: ['user','session'], default: 'user' },
-        importance: { type: 'number', default: 0.5 },
-        tags:       { type: 'array', items: { type: 'string' }, default: [] },
-        sessionId:  { type: 'string' }
-      },
-      required: ['content']
-    }
-  },
-  {
-    name: 'memory_search',
-    description: 'Busca recuerdos por texto.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string' },
-        limit: { type: 'number', default: 10 },
-        scope: { type: 'string', enum: ['user','session'] }
-      },
-      required: ['query']
-    }
-  },
-  {
-    name: 'memory_recall',
-    description: 'Recupera recuerdos recientes por importancia. Úsalo al inicio de conversación.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        scope:         { type: 'string', enum: ['user','session'], default: 'user' },
-        type:          { type: 'string', enum: ['fact','preference','task','note','summary'] },
-        limit:         { type: 'number', default: 20 },
-        minImportance: { type: 'number', default: 0.0 }
-      }
-    }
-  },
-  {
-    name: 'memory_forget',
-    description: 'Elimina un recuerdo por ID.',
-    inputSchema: {
-      type: 'object',
-      properties: { memoryId: { type: 'number' } },
-      required: ['memoryId']
-    }
-  },
-  {
-    name: 'memory_context',
-    description: 'Genera un bloque de contexto con recuerdos relevantes para inyectar al prompt.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query:           { type: 'string' },
-        sessionId:       { type: 'string' },
-        maxTokensApprox: { type: 'number', default: 1500 }
-      }
-    }
-  }
-];
-
-function handleTool(mem, name, args) {
-  switch (name) {
-    case 'memory_save': {
-      const id = mem.save(args.content, {
-        type: args.type || 'fact',
-        scope: args.scope || 'user',
-        sessionId: args.sessionId || null,
-        importance: args.importance ?? 0.5,
-        tags: args.tags || []
-      });
-      return { success: true, memoryId: id, message: `Recuerdo guardado con ID ${id}` };
-    }
-    case 'memory_search': {
-      const results = mem.search(args.query, { limit: args.limit || 10, scope: args.scope || null });
-      return { count: results.length, memories: results.map(m => ({ id: m.id, type: m.type, scope: m.scope, content: m.content, importance: m.importance, createdAt: m.created_at })) };
-    }
-    case 'memory_recall': {
-      const results = mem.recall({ scope: args.scope || 'user', type: args.type || null, limit: args.limit || 20, minImportance: args.minImportance || 0.0 });
-      return { count: results.length, memories: results.map(m => ({ id: m.id, type: m.type, scope: m.scope, content: m.content, importance: m.importance, createdAt: m.created_at })) };
-    }
-    case 'memory_forget': {
-      mem.forget(args.memoryId);
-      return { success: true, message: `Recuerdo ${args.memoryId} eliminado` };
-    }
-    case 'memory_context': {
-      const block = mem.buildContextBlock(args.query || null, { sessionId: args.sessionId || null, maxTokensApprox: args.maxTokensApprox || 1500 });
-      return { contextBlock: block, empty: block.length === 0 };
-    }
-    default:
-      throw new Error(`Tool desconocida: ${name}`);
-  }
-}
-
-async function main() {
-  // Inicializar memoria ANTES de abrir readline
-  let mem;
-  try {
-    mem = await MemoryManager.create(process.env.MEMORY_DB_PATH || DEFAULT_DB);
-  } catch (err) {
-    process.stderr.write('Error iniciando MemoryManager: ' + err.message + '\n');
-    process.exit(1);
+class MemoryManager {
+  constructor(db, dbPath) {
+    this.db = db;
+    this.dbPath = dbPath;
   }
 
-  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  static async create(dbPath) {
+    const SQL = await initSqlJs();
+    let db;
+    
+    // Crear el directorio si no existe
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
 
-  function send(obj) {
-    process.stdout.write(JSON.stringify(obj) + '\n');
+    if (fs.existsSync(dbPath)) {
+      const fileBuffer = fs.readFileSync(dbPath);
+      db = new SQL.Database(fileBuffer);
+    } else {
+      db = new SQL.Database();
+      // Inicializar esquema FTS5 basado en tu database.db
+      db.run(`
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT DEFAULT 'gemma4', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), metadata TEXT DEFAULT '{}');
+        CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, type TEXT NOT NULL DEFAULT 'fact', scope TEXT NOT NULL DEFAULT 'user', content TEXT NOT NULL, importance REAL DEFAULT 0.5, access_count INTEGER DEFAULT 0, last_accessed TEXT, created_at TEXT DEFAULT (datetime('now')), expires_at TEXT, metadata TEXT DEFAULT '{}');
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content='memories', content_rowid='id', tokenize='unicode61');
+        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content); END;
+        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, old.content); END;
+        CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, old.content); INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content); END;
+      `);
+    }
+    const manager = new MemoryManager(db, dbPath);
+    manager._persist();
+    return manager;
   }
 
-  rl.on('line', (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    let msg;
-    try { msg = JSON.parse(trimmed); } catch { return; }
-    const { id, method, params } = msg;
+  _persist() {
+    const data = this.db.export();
+    fs.writeFileSync(this.dbPath, Buffer.from(data));
+  }
+
+  save(content, opts = {}) {
+    const type = opts.type || 'fact';
+    const scope = opts.scope || 'user';
+    const sessionId = opts.sessionId || null;
+    const importance = opts.importance ?? 0.5;
+
+    const stmt = this.db.prepare("INSERT INTO memories (content, type, scope, session_id, importance) VALUES (?, ?, ?, ?, ?)");
+    stmt.run([content, type, scope, sessionId, importance]);
+    stmt.free();
+
+    const res = this.db.exec("SELECT last_insert_rowid() as id");
+    const id = res[0].values[0][0];
+
+    this._persist();
+    return id;
+  }
+
+  search(query, opts = {}) {
+    const limit = opts.limit || 10;
+    const sql = `SELECT id, content, type, scope, importance, created_at FROM memories WHERE id IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?) ORDER BY importance DESC LIMIT ?`;
     try {
-      if (method === 'initialize') {
-        send({
-          jsonrpc: '2.0', id,
-          result: {
-            protocolVersion: '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: { name: 'memory-sql', version: '1.0.0' }
-          }
-        });
-      } else if (method === 'notifications/initialized') {
-        // sin respuesta
-      } else if (method === 'tools/list') {
-        send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
-      } else if (method === 'tools/call') {
-        const result = handleTool(mem, params.name, params.arguments || {});
-        send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });
-      } else {
-        send({ jsonrpc: '2.0', id, error: { code: -32601, message: `Método no soportado: ${method}` } });
-      }
-    } catch (err) {
-      send({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } });
+      const stmt = this.db.prepare(sql);
+      stmt.bind([query, limit]);
+      const results = [];
+      while (stmt.step()) { results.push(stmt.getAsObject()); }
+      stmt.free();
+      return results;
+    } catch(e) {
+      return []; // FTS5 MATCH fails gracefully on empty or bad syntax
     }
-  });
+  }
 
-  rl.on('close', () => { mem.close(); process.exit(0); });
-  process.on('SIGINT', () => { mem.close(); process.exit(0); });
-  process.on('SIGTERM', () => { mem.close(); process.exit(0); });
+  recall(opts = {}) {
+    const limit = opts.limit || 20;
+    const sql = `SELECT id, content, type, scope, importance, created_at FROM memories ORDER BY importance DESC, created_at DESC LIMIT ?`;
+    const stmt = this.db.prepare(sql);
+    stmt.bind([limit]);
+    const results = [];
+    while (stmt.step()) { results.push(stmt.getAsObject()); }
+    stmt.free();
+    return results;
+  }
+
+  forget(id) {
+    const stmt = this.db.prepare("DELETE FROM memories WHERE id = ?");
+    stmt.run([id]);
+    stmt.free();
+    this._persist();
+  }
+
+  buildContextBlock(query, opts = {}) {
+    const memories = query ? this.search(query, {limit: 5}) : this.recall({limit: 5});
+    if (memories.length === 0) return "";
+    return "Relevant Context:\n" + memories.map(m => `- [${m.type}] ${m.content}`).join("\n");
+  }
+
+  close() {
+    this.db.close();
+  }
 }
 
-main().catch(err => {
-  process.stderr.write(err.message + '\n');
-  process.exit(1);
-});
+module.exports = { MemoryManager, DEFAULT_DB };

@@ -3,6 +3,10 @@
   "name": "Memory SQL Persistent",
   "version": "1.0.0",
   "main": "index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {}
+  },
   "mcp": {
     "command": "node",
     "args": ["memory_mcp_server.js"]
