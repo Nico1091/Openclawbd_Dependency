@@ -1,0 +1,10 @@
+{
+  "id": "memory-sql",
+  "name": "Memory SQL Persistent",
+  "version": "1.0.0",
+  "main": "index.js",
+  "mcp": {
+    "command": "node",
+    "args": ["memory_mcp_server.js"]
+  }
+}

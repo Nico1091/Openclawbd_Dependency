@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-memory-sql",
+  "version": "1.0.0",
+  "description": "Memoria persistente SQL para OpenClaw + Gemma 4",
+  "main": "memory_mcp_server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node memory_mcp_server.js"
+  },
+  "dependencies": {
+    "sql.js": "^1.12.0"
+  }
+}

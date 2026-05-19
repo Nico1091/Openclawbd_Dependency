@@ -1,0 +1,113 @@
+-- ============================================================
+-- Esquema de memoria para OpenClaw + Gemma 4 (LM Studio)
+-- Base: SQLite con FTS5 (incluido en Python, sin instalaciones)
+-- ============================================================
+
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+
+-- ------------------------------------------------------------
+-- Sesiones de conversación
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sessions (
+    id          TEXT PRIMARY KEY,           -- UUID o slug legible
+    title       TEXT,                       -- resumen opcional
+    model       TEXT DEFAULT 'gemma4',
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    metadata    TEXT DEFAULT '{}'           -- JSON libre
+);
+
+-- ------------------------------------------------------------
+-- Memorias (unidad básica)
+-- tipo: 'fact' | 'preference' | 'task' | 'note' | 'summary'
+-- scope: 'session' (olvida al cerrar) | 'user' (persiste)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS memories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    type        TEXT NOT NULL DEFAULT 'fact',
+    scope       TEXT NOT NULL DEFAULT 'user',   -- 'session' | 'user'
+    content     TEXT NOT NULL,
+    importance  REAL DEFAULT 0.5,               -- 0.0 a 1.0
+    access_count INTEGER DEFAULT 0,
+    last_accessed TEXT,
+    created_at  TEXT DEFAULT (datetime('now')),
+    expires_at  TEXT,                           -- NULL = nunca expira
+    metadata    TEXT DEFAULT '{}'
+);
+
+-- ------------------------------------------------------------
+-- Entidades mencionadas (personas, proyectos, lugares, etc.)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS entities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    type        TEXT DEFAULT 'general',         -- 'person' | 'project' | 'place' | 'concept'
+    description TEXT,
+    created_at  TEXT DEFAULT (datetime('now')),
+    metadata    TEXT DEFAULT '{}'
+);
+
+-- Relación memories <-> entities (muchos a muchos)
+CREATE TABLE IF NOT EXISTS memory_entities (
+    memory_id   INTEGER REFERENCES memories(id) ON DELETE CASCADE,
+    entity_id   INTEGER REFERENCES entities(id) ON DELETE CASCADE,
+    PRIMARY KEY (memory_id, entity_id)
+);
+
+-- ------------------------------------------------------------
+-- Tags para clasificación rápida
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tags (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name  TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS memory_tags (
+    memory_id INTEGER REFERENCES memories(id) ON DELETE CASCADE,
+    tag_id    INTEGER REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (memory_id, tag_id)
+);
+
+-- ------------------------------------------------------------
+-- FTS5: búsqueda de texto completo sin dependencias extra
+-- Sincronizado automáticamente via triggers
+-- ------------------------------------------------------------
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    content='memories',
+    content_rowid='id',
+    tokenize='unicode61'
+);
+
+-- Triggers para mantener FTS sincronizado
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content)
+    VALUES ('delete', old.id, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content)
+    VALUES ('delete', old.id, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+-- Trigger: actualiza updated_at en sessions
+CREATE TRIGGER IF NOT EXISTS sessions_update AFTER UPDATE ON sessions BEGIN
+    UPDATE sessions SET updated_at = datetime('now') WHERE id = new.id;
+END;
+
+-- ------------------------------------------------------------
+-- Índices para consultas frecuentes
+-- ------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_memories_scope     ON memories(scope);
+CREATE INDEX IF NOT EXISTS idx_memories_type      ON memories(type);
+CREATE INDEX IF NOT EXISTS idx_memories_session   ON memories(session_id);
+CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_expires   ON memories(expires_at);
+CREATE INDEX IF NOT EXISTS idx_entities_type      ON entities(type);
